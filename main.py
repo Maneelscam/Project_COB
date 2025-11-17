@@ -16,13 +16,13 @@ class INETApp(ctk.CTk):
         self.sidebar = Sidebar(self, command=self.navegar)
         self.sidebar.pack(side="left", fill="y")
 
-        # Frame principal (onde as páginas aparecem) 
+        # Frame principal (onde as páginas aparecem)
         self.container = ctk.CTkFrame(self, corner_radius=15)
         self.container.pack(side="right", fill="both", expand=True, padx=20, pady=20)
 
         # Página inicial
         self.pagina_atual = None
-        self.navegar("dashboard") 
+        self.navegar("dashboard")
 
     def navegar(self, destino: str):
         # Remove a página atual se existir

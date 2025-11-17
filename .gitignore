@@ -1,4 +1,21 @@
-__pycache__/
-.vscode/
-venv/
+
+Ignora o ambiente virtual
+
+.venv/
+
+Ignora os arquivos de cache do Python
+
+pycache/
 *.pyc
+
+--- IMPORTANTE ---
+
+Ignora o "banco de dados" de contatos para proteger dados privados
+
+contatos.csv
+
+Ignora o arquivo de configuração de mensagem
+
+(Você pode remover a linha abaixo se QUISER salvar seu template no GitHub)
+
+config.json
