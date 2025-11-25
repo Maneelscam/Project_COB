@@ -1,12 +1,13 @@
-import csv
-import json # Usado para salvar o modelo de mensagem
+import json  # Usado para salvar o modelo de mensagem
 import os
+import sqlite3
 import uuid
 from datetime import datetime
-import textwrap # <-- ADICIONADO para formatar a mensagem
+import math
+import textwrap  # <-- ADICIONADO para formatar a mensagem
 
 # --- Constantes ---
-DB_FILE = 'contatos.csv'
+DB_FILE = 'banco.db'
 CONFIG_FILE = 'config.json'
 FIELDNAMES = ['id', 'nome', 'telefone', 'status', 'mensagem', 'ultimo_envio']
 STATUS_OPTIONS = ["Pendente", "Enviado", "Falha", "Respondido"]
@@ -57,113 +58,198 @@ def save_message_template(template_content):
 # ... (existing code ... json.dump) ...
         json.dump({"message_template": template_content}, f, indent=4)
 
-# --- Funções de Banco de Dados (CSV) ---
+# --- Funções auxiliares de Banco de Dados (SQLite) ---
 
-def _check_db_file():
-# ... (existing code ... _check_db_file) ...
-    """Verifica se o arquivo CSV existe e tem os cabeçalhos corretos."""
-    if not os.path.exists(DB_FILE):
-# ... (existing code ... open) ...
-        with open(DB_FILE, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
-# ... (existing code ... writer.writeheader) ...
-            writer.writeheader()
+def _get_connection():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-def load_contacts():
+
+def init_db():
+    """Cria a tabela de contatos caso ainda não exista."""
+    with _get_connection() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS contatos (
+                id TEXT PRIMARY KEY,
+                nome TEXT NOT NULL,
+                telefone TEXT NOT NULL,
+                status TEXT NOT NULL,
+                mensagem TEXT,
+                ultimo_envio TEXT
+            )
+            """
+        )
+        conn.commit()
+
+
+def load_contacts(page=1, page_size=50, search_query=None, status_filter=None):
 # ... (existing code ... load_contacts) ...
-    """Carrega todos os contatos do arquivo CSV."""
-    _check_db_file()
-# ... (existing code ... contacts) ...
-    contacts = []
-    with open(DB_FILE, 'r', newline='', encoding='utf-8') as f:
-# ... (existing code ... reader) ...
-        reader = csv.DictReader(f)
-        for row in reader:
-# ... (existing code ... contacts.append) ...
-            contacts.append(row)
-    return contacts
+    """Carrega contatos do banco SQLite com paginação e filtros."""
+    init_db()
+    page = max(1, int(page) if page else 1)
+    page_size = max(1, int(page_size) if page_size else 50)
+    offset = (page - 1) * page_size
+
+    conditions = []
+    params = []
+
+    if search_query:
+        pattern = f"%{search_query.strip().lower()}%"
+        conditions.append("(LOWER(nome) LIKE ? OR LOWER(telefone) LIKE ?)")
+        params.extend([pattern, pattern])
+
+    if status_filter:
+        conditions.append("status = ?")
+        params.append(status_filter)
+
+    where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+
+    query = f"""
+        SELECT id, nome, telefone, status, mensagem, ultimo_envio
+        FROM contatos
+        {where_clause}
+        ORDER BY rowid
+        LIMIT ? OFFSET ?
+    """
+    params.extend([page_size, offset])
+
+    with _get_connection() as conn:
+        rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_total_pages(page_size=50, search_query=None, status_filter=None):
+    """Retorna o total de páginas disponíveis para os filtros informados."""
+    init_db()
+    page_size = max(1, int(page_size) if page_size else 50)
+
+    conditions = []
+    params = []
+
+    if search_query:
+        pattern = f"%{search_query.strip().lower()}%"
+        conditions.append("(LOWER(nome) LIKE ? OR LOWER(telefone) LIKE ?)")
+        params.extend([pattern, pattern])
+
+    if status_filter:
+        conditions.append("status = ?")
+        params.append(status_filter)
+
+    where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = f"SELECT COUNT(*) as total FROM contatos {where_clause}"
+
+    with _get_connection() as conn:
+        row = conn.execute(query, params).fetchone()
+        total = row["total"] if row else 0
+
+    total_pages = math.ceil(total / page_size) if total else 1
+    return max(1, total_pages)
 
 def get_contact(contact_id):
 # ... (existing code ... get_contact) ...
     """Busca um contato específico pelo seu ID."""
-    contacts = load_contacts()
-# ... (existing code ... for contact) ...
-    for contact in contacts:
-        if contact['id'] == contact_id:
-# ... (existing code ... return contact) ...
-            return contact
-    return None
+    init_db()
+    with _get_connection() as conn:
+        row = conn.execute(
+            "SELECT id, nome, telefone, status, mensagem, ultimo_envio FROM contatos WHERE id = ?",
+            (contact_id,),
+        ).fetchone()
+        return dict(row) if row else None
 
-def add_contact(nome, telefone, mensagem="", status="Pendente", ultimo_envio=""):
+def add_contact(nome, telefone, mensagem="", status="Pendente", ultimo_envio="", custom_id=None):
 # ... (existing code ... add_contact) ...
-    """Adiciona um novo contato ao CSV."""
-    _check_db_file()
-# ... (existing code ... new_contact) ...
-    new_contact = {
-        'id': str(uuid.uuid4())[:8], # ID curto
-# ... (existing code ... 'nome') ...
-        'nome': nome,
-        'telefone': telefone,
-# ... (existing code ... 'status') ...
-        'status': status,
-        'mensagem': mensagem,
-# ... (existing code ... 'ultimo_envio') ...
-        'ultimo_envio': ultimo_envio
-    }
+    """Adiciona um novo contato ao banco SQLite. Se custom_id for fornecido e já existir, atualiza a mensagem concatenando."""
+    init_db()
+    contact_id = custom_id if custom_id else str(uuid.uuid4())[:8]
     
-# ... (existing code ... open) ...
-    with open(DB_FILE, 'a', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
-# ... (existing code ... writer.writerow) ...
-        writer.writerow(new_contact)
-    return new_contact
-
-def _save_all_contacts(contacts):
-# ... (existing code ... _save_all_contacts) ...
-    """Salva a lista inteira de contatos de volta ao CSV (usado por edit/delete)."""
-    with open(DB_FILE, 'w', newline='', encoding='utf-8') as f:
-# ... (existing code ... writer) ...
-        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
-        writer.writeheader()
-# ... (existing code ... writer.writerows) ...
-        writer.writerows(contacts)
+    with _get_connection() as conn:
+        # Verifica se o ID já existe
+        existing = conn.execute(
+            "SELECT id, nome, telefone, status, mensagem, ultimo_envio FROM contatos WHERE id = ?",
+            (contact_id,)
+        ).fetchone()
+        
+        if existing:
+            # Se existe, concatena a mensagem nova com a existente
+            existing_dict = dict(existing)
+            mensagem_existente = existing_dict.get('mensagem', '') or ''
+            mensagem_nova = mensagem or ''
+            
+            if mensagem_existente and mensagem_nova:
+                mensagem_final = f"{mensagem_existente} | {mensagem_nova}"
+            elif mensagem_nova:
+                mensagem_final = mensagem_nova
+            else:
+                mensagem_final = mensagem_existente
+            
+            # Atualiza o contato existente
+            conn.execute(
+                """
+                UPDATE contatos
+                SET nome = ?, telefone = ?, mensagem = ?, status = ?
+                WHERE id = ?
+                """,
+                (nome, telefone, mensagem_final, status, contact_id)
+            )
+            conn.commit()
+            return {
+                'id': contact_id,
+                'nome': nome,
+                'telefone': telefone,
+                'status': status,
+                'mensagem': mensagem_final,
+                'ultimo_envio': existing_dict.get('ultimo_envio', '')
+            }
+        else:
+            # Se não existe, insere novo
+            new_contact = {
+                'id': contact_id,
+                'nome': nome,
+                'telefone': telefone,
+                'status': status,
+                'mensagem': mensagem,
+                'ultimo_envio': ultimo_envio
+            }
+            conn.execute(
+                """
+                INSERT INTO contatos (id, nome, telefone, status, mensagem, ultimo_envio)
+                VALUES (:id, :nome, :telefone, :status, :mensagem, :ultimo_envio)
+                """,
+                new_contact,
+            )
+            conn.commit()
+            return new_contact
 
 def edit_contact(contact_id, nome, telefone, mensagem, status):
 # ... (existing code ... edit_contact) ...
     """Atualiza um contato existente."""
-    contacts = load_contacts()
-# ... (existing code ... updated) ...
-    updated = False
-    for contact in contacts:
-# ... (existing code ... if contact) ...
-        if contact['id'] == contact_id:
-            contact['nome'] = nome
-# ... (existing code ... contact) ...
-            contact['telefone'] = telefone
-            contact['mensagem'] = mensagem
-# ... (existing code ... contact) ...
-            contact['status'] = status
-            updated = True
-# ... (existing code ... break) ...
-            break
-    if updated:
-# ... (existing code ... _save_all_contacts) ...
-        _save_all_contacts(contacts)
-    return updated
+    init_db()
+    with _get_connection() as conn:
+        cur = conn.execute(
+            """
+            UPDATE contatos
+            SET nome = ?, telefone = ?, mensagem = ?, status = ?
+            WHERE id = ?
+            """,
+            (nome, telefone, mensagem, status, contact_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
 
 def delete_contact(contact_id):
 # ... (existing code ... delete_contact) ...
     """Exclui um contato pelo ID."""
-    contacts = load_contacts()
-# ... (existing code ... contacts_to_keep) ...
-    contacts_to_keep = [c for c in contacts if c['id'] != contact_id]
-    
-# ... (existing code ... if len) ...
-    if len(contacts) > len(contacts_to_keep):
-        _save_all_contacts(contacts_to_keep)
-# ... (existing code ... return True) ...
-        return True
-    return False
+    init_db()
+    with _get_connection() as conn:
+        cur = conn.execute("DELETE FROM contatos WHERE id = ?", (contact_id,))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+# Garante que o banco exista logo ao importar o módulo
+init_db()
 
 def mark_sent(contact_id):
 # ... (existing code ... mark_sent) ...

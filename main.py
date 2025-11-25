@@ -3,8 +3,8 @@ from components.sidebar import Sidebar
 from pages.dashboard import DashboardPage
 import customtkinter as ctk
 
-class INETApp(ctk.CTk):
-    def __init__(self):
+class INETApp(ctk.CTk): 
+    def __init__(self): 
         super().__init__()
 
         self.title("INET - GERENCIADOR DE CONTATOS V9 (testes)")

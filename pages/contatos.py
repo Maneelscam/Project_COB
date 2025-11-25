@@ -1,6 +1,9 @@
 import customtkinter as ctk
 from tkinter import ttk, messagebox, simpledialog, END, filedialog
 import tkinter as tk
+import os
+import csv
+from itertools import zip_longest
 from core import contatos_controller as ctrl
 from urllib.parse import quote
 import webbrowser
@@ -13,6 +16,14 @@ except ImportError:
     PANDAS_AVAILABLE = False
     print("AVISO: 'pandas' não encontrado. A importação de planilhas estará desabilitada.")
     print("Para habilitar, instale com: pip install pandas openpyxl")
+
+try:
+    from openpyxl import load_workbook
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
+    if not PANDAS_AVAILABLE:
+        print("AVISO: 'openpyxl' não encontrado. Importação de .xlsx depende de pandas ou openpyxl.")
 
 
 class AddEditDialog(simpledialog.Dialog):
@@ -71,6 +82,119 @@ class AddEditDialog(simpledialog.Dialog):
             return
 # ... (existing code ... self.result) ...
         self.result = {"nome": nome, "telefone": tel, "status": status, "mensagem": mensagem}
+
+
+class ColumnMappingDialog(ctk.CTkToplevel):
+    """Janela modal para mapear colunas importadas."""
+
+    FIELD_PROFILES = {
+        "Contatos Padrão": [
+            ("id", "ID", False),
+            ("nome", "Nome", True),
+            ("telefone", "Telefone", True),
+            ("status", "Status", False),
+            ("mensagem", "Obs", False),
+        ],
+        "Relatório Negativados": [
+            ("id", "ID", False),
+            ("nome", "Nome", True),
+            ("valor", "Valor", False),
+            ("vencimento", "Vencimento", False),
+            ("id_titulo", "ID Título", False),
+            ("mensagem", "Obs", False),
+        ],
+    }
+
+    def __init__(self, parent, headers):
+        super().__init__(parent)
+        self.title("Mapear Colunas")
+        self.resizable(False, False)
+        self.grab_set()
+        self.headers = headers or []
+        self.result = None
+        self._vars = {}
+        self.profile_var = ctk.StringVar(value="Contatos Padrão")
+
+        frame = ctk.CTkFrame(self)
+        frame.pack(padx=20, pady=20, fill="both", expand=True)
+
+        ctk.CTkLabel(frame, text="Tipo de Planilha").grid(row=0, column=0, sticky="e", padx=(0, 10), pady=(0, 12))
+        type_combo = ctk.CTkComboBox(
+            frame,
+            values=list(self.FIELD_PROFILES.keys()),
+            variable=self.profile_var,
+            width=260,
+            command=lambda _: self._render_fields(frame)
+        )
+        type_combo.grid(row=0, column=1, sticky="w", pady=(0, 12))
+
+        ctk.CTkLabel(
+            frame,
+            text="Associe as colunas da planilha aos campos do sistema:",
+            wraplength=360,
+        ).grid(row=1, column=0, columnspan=2, sticky="w")
+
+        self.fields_container = ctk.CTkFrame(frame, fg_color="transparent")
+        self.fields_container.grid(row=2, column=0, columnspan=2, pady=(10, 0))
+        self._render_fields(frame)
+
+        buttons = ctk.CTkFrame(frame, fg_color="transparent")
+        buttons.grid(row=3, column=0, columnspan=2, pady=(16, 0))
+        ctk.CTkButton(buttons, text="Cancelar", command=self.destroy).pack(side="left", padx=6)
+        ctk.CTkButton(buttons, text="Confirmar Importação", command=self._on_confirm).pack(side="left", padx=6)
+
+        self.update_idletasks()
+        self.geometry(f"+{parent.winfo_rootx()+80}+{parent.winfo_rooty()+80}")
+
+    def _find_default(self, label):
+        for header in self.headers:
+            if header and header.lower() == label.lower():
+                return header
+        return "<Ignorar>"
+
+    def _current_fields(self):
+        return self.FIELD_PROFILES.get(self.profile_var.get(), [])
+
+    def _render_fields(self, parent_frame):
+        for widget in self.fields_container.winfo_children():
+            widget.destroy()
+
+        self._vars.clear()
+        combo_values = ["<Ignorar>"] + self.headers
+
+        for idx, (key, label, required) in enumerate(self._current_fields()):
+            display = f"{label} {'*' if required else '(opcional)'}"
+            ctk.CTkLabel(self.fields_container, text=display).grid(row=idx, column=0, sticky="e", padx=(0, 10), pady=6)
+            default = self._find_default(label)
+            var = ctk.StringVar(value=default)
+            combo = ctk.CTkComboBox(self.fields_container, values=combo_values, variable=var, width=260)
+            combo.grid(row=idx, column=1, sticky="w", pady=6)
+            self._vars[key] = var
+
+    def _on_confirm(self):
+        mapping = {}
+        used = set()
+        for key, label, required in self._current_fields():
+            choice = self._vars[key].get()
+            resolved = "" if choice == "<Ignorar>" else choice
+            if required and not resolved:
+                messagebox.showwarning("Mapeamento obrigatório", f"Selecione uma coluna para '{label}'.", parent=self)
+                return
+            if resolved:
+                if resolved in used:
+                    messagebox.showwarning(
+                        "Coluna duplicada",
+                        f"A coluna '{resolved}' foi escolhida para mais de um campo.",
+                        parent=self,
+                    )
+                    return
+                used.add(resolved)
+            mapping[key] = resolved
+        self.result = {
+            "profile": self.profile_var.get(),
+            "mapping": mapping,
+        }
+        self.destroy()
 
 
 class ContatosPage(ctk.CTkFrame):
@@ -139,9 +263,6 @@ class ContatosPage(ctk.CTkFrame):
 # ... (existing code ... self.btn_import) ...
         self.btn_import = ctk.CTkButton(toolbar, text="📂 Importar", command=self.action_import)
         self.btn_import.grid(row=0, column=1, padx=6, pady=6)
-# ... (existing code ... if not PANDAS_AVAILABLE) ...
-        if not PANDAS_AVAILABLE:
-            self.btn_import.configure(state="disabled")
 # ... (existing code ... self.btn_edit) ...
         self.btn_edit = ctk.CTkButton(toolbar, text="✏️ Editar", command=self.action_edit)
         self.btn_edit.grid(row=0, column=2, padx=6, pady=6)
@@ -163,7 +284,7 @@ class ContatosPage(ctk.CTkFrame):
         self.search_entry = ctk.CTkEntry(toolbar, placeholder_text="Nome ou Telefone...", width=240)
         self.search_entry.grid(row=0, column=6, padx=6)
 # ... (existing code ... self.search_entry.bind) ...
-        self.search_entry.bind("<KeyRelease>", lambda e: self.refresh_table())
+        self.search_entry.bind("<KeyRelease>", self.on_search_change)
 
         # Barra de Filtro de Status
 # ... (existing code ... self.filter_frame) ...
@@ -195,19 +316,20 @@ class ContatosPage(ctk.CTkFrame):
         columns = ("id","nome","telefone","status","ultimo_envio")
         self.tree = ttk.Treeview(self.table_frame, columns=columns, show="headings", selectmode="browse")
 # ... (existing code ... self.tree.heading) ...
-        self.tree.heading("nome", text="Nome")
-        self.tree.heading("telefone", text="Telefone")
+        self.tree.heading("id", text="ID")
+        self.tree.heading("nome", text="NOME")
+        self.tree.heading("telefone", text="TELEFONE")
 # ... (existing code ... self.tree.heading) ...
-        self.tree.heading("status", text="Status")
-        self.tree.heading("ultimo_envio", text="Último envio")
+        self.tree.heading("status", text="STATUS")
+        self.tree.heading("ultimo_envio", text="ÚLTIMO ENVIO")
 # ... (existing code ... self.tree.column) ...
-        self.tree.column("id", width=0, stretch=False)
-        self.tree.column("nome", width=250, minwidth=200)
+        self.tree.column("id", width=80, minwidth=80, anchor="center", stretch=False)
+        self.tree.column("nome", width=250, minwidth=200, anchor="w", stretch=True)
 # ... (existing code ... self.tree.column) ...
-        self.tree.column("telefone", width=140, minwidth=120)
-        self.tree.column("status", width=100, minwidth=90, anchor="center")
+        self.tree.column("telefone", width=120, minwidth=120, stretch=False)
+        self.tree.column("status", width=100, minwidth=90, anchor="center", stretch=False)
 # ... (existing code ... self.tree.column) ...
-        self.tree.column("ultimo_envio", width=150, minwidth=140, anchor="center")
+        self.tree.column("ultimo_envio", width=120, minwidth=120, anchor="center", stretch=False)
         self.tree.grid(row=0, column=0, sticky="nsew")
 # ... (existing code ... vsb) ...
         vsb = ctk.CTkScrollbar(self.table_frame, command=self.tree.yview)
@@ -251,67 +373,96 @@ class ContatosPage(ctk.CTkFrame):
         self.btn_send_whatsapp.grid(row=8, column=0, padx=12, pady=6, sticky="ew")
 
 # ... (existing code ... self.refresh_table) ...
+        self.pagination_frame = ctk.CTkFrame(self)
+        self.pagination_frame.grid(row=3, column=0, columnspan=2, sticky="ew", padx=12, pady=(0,12))
+        self.pagination_frame.grid_columnconfigure(1, weight=1)
+        self.btn_prev_page = ctk.CTkButton(self.pagination_frame, text="◀ Anterior", width=120, command=lambda: self.change_page(-1))
+        self.btn_prev_page.grid(row=0, column=0, pady=6, sticky="w")
+        self.page_info_label = ctk.CTkLabel(self.pagination_frame, text="Página 1 de 1", anchor="center")
+        self.page_info_label.grid(row=0, column=1, pady=6)
+        self.btn_next_page = ctk.CTkButton(self.pagination_frame, text="Próximo ▶", width=120, command=lambda: self.change_page(1))
+        self.btn_next_page.grid(row=0, column=2, pady=6, sticky="e")
+
+        self.page_size = 50
+        self.current_page = 1
+        self.total_pages = 1
+
         self.refresh_table()
 
     # ---------- Operações da Tabela ----------
 # ... (existing code ... def refresh_table) ...
     def refresh_table(self):
-        """Carrega contatos do controller e atualiza a treeview, filtrando pela busca."""
-# ... (existing code ... selected_id) ...
+        """Carrega contatos do controller e atualiza a treeview, aplicando paginação e filtros no servidor."""
         selected_id = None
         if self.tree.focus():
-# ... (existing code ... vals) ...
             vals = self.tree.item(self.tree.focus())["values"]
             if vals:
-# ... (existing code ... selected_id) ...
                 selected_id = str(vals[0])
-        
-        contatos = ctrl.load_contacts()
-# ... (existing code ... termo) ...
-        termo = self.search_entry.get().strip().lower() if hasattr(self, "search_entry") else ""
-        filtro_status = self.filter_var.get() if hasattr(self, "filter_var") else "Todos"
 
-# ... (existing code ... self.tree.delete) ...
+        search_term = self.search_entry.get().strip() if hasattr(self, "search_entry") else ""
+        status_filter = None
+        if hasattr(self, "filter_var"):
+            status_value = self.filter_var.get()
+            if status_value != "Todos":
+                status_filter = status_value
+
+        self.total_pages = ctrl.get_total_pages(
+            page_size=self.page_size,
+            search_query=search_term,
+            status_filter=status_filter,
+        )
+        if self.current_page > self.total_pages:
+            self.current_page = self.total_pages
+
+        contatos = ctrl.load_contacts(
+            page=self.current_page,
+            page_size=self.page_size,
+            search_query=search_term,
+            status_filter=status_filter,
+        )
+
         self.tree.delete(*self.tree.get_children())
-        
+
         item_a_selecionar = None
-# ... (existing code ... for c) ...
         for c in contatos:
-            if filtro_status != "Todos":
-# ... (existing code ... if c.get) ...
-                if c.get("status", "Pendente") != filtro_status:
-                    continue
-# ... (existing code ... if termo) ...
-            if termo:
-                if termo not in c.get("nome","" ).lower() and termo not in c.get("telefone","" ).lower():
-# ... (existing code ... continue) ...
-                    continue
-            
             contact_id_str = str(c.get("id",""))
-# ... (existing code ... item_id) ...
             item_id = self.tree.insert("", END, values=(
-                contact_id_str, 
-# ... (existing code ... c.get) ...
-                c.get("nome","" ), 
-                c.get("telefone","" ), 
-# ... (existing code ... c.get) ...
-                c.get("status","" ), 
+                contact_id_str,
+                c.get("nome","" ),
+                c.get("telefone","" ),
+                c.get("status","" ),
                 c.get("ultimo_envio","" )
-# ... (existing code ... )) ...
             ))
             if contact_id_str == selected_id:
-# ... (existing code ... item_a_selecionar) ...
                 item_a_selecionar = item_id
-        
+
         if item_a_selecionar:
-# ... (existing code ... self.tree.selection_set) ...
             self.tree.selection_set(item_a_selecionar)
             self.tree.focus(item_a_selecionar)
-# ... (existing code ... self.on_select) ...
             self.on_select()
         else:
-# ... (existing code ... self.clear_details) ...
             self.clear_details()
+
+        self.update_pagination_controls()
+
+    def update_pagination_controls(self):
+        if hasattr(self, "page_info_label"):
+            self.page_info_label.configure(text=f"Página {self.current_page} de {self.total_pages}")
+        if hasattr(self, "btn_prev_page"):
+            self.btn_prev_page.configure(state="disabled" if self.current_page <= 1 else "normal")
+        if hasattr(self, "btn_next_page"):
+            self.btn_next_page.configure(state="disabled" if self.current_page >= self.total_pages else "normal")
+
+    def change_page(self, delta):
+        new_page = self.current_page + delta
+        if new_page < 1 or new_page > self.total_pages:
+            return
+        self.current_page = new_page
+        self.refresh_table()
+
+    def on_search_change(self, _event=None):
+        self.current_page = 1
+        self.refresh_table()
 
     # --- (ESTA É A FUNÇÃO QUE ESTÁ CAUSANDO O BUG) ---
 # ... (existing code ... def on_select) ...
@@ -438,20 +589,11 @@ class ContatosPage(ctk.CTkFrame):
     # --- Ações de Filtro e Importação ---
 # ... (existing code ... def on_filter_change) ...
     def on_filter_change(self, value):
+        self.current_page = 1
         self.refresh_table()
 
 # ... (existing code ... def action_import) ...
     def action_import(self):
-        if not PANDAS_AVAILABLE:
-# ... (existing code ... messagebox.showerror) ...
-            messagebox.showerror("Recurso Faltando", 
-                                 "A biblioteca 'pandas' é necessária para importar planilhas.\n"
-# ... (existing code ... No seu terminal) ...
-                                 "No seu terminal, execute: pip install pandas openpyxl",
-                                 parent=self)
-# ... (existing code ... return) ...
-            return
-
         filepath = filedialog.askopenfilename(
 # ... (existing code ... title) ...
             title="Selecionar planilha para importar",
@@ -462,51 +604,92 @@ class ContatosPage(ctk.CTkFrame):
 # ... (existing code ... if not filepath) ...
         if not filepath: return
         try:
-# ... (existing code ... if filepath.endswith) ...
-            if filepath.endswith('.csv'):
-                df = pd.read_csv(filepath)
-# ... (existing code ... else) ...
-            else:
-                df = pd.read_excel(filepath)
-
-# ... (existing code ... if 'Nome') ...
-            if 'Nome' not in df.columns or 'Telefone' not in df.columns:
-                messagebox.showerror("Colunas Faltando", 
-# ... (existing code ... A planilha) ...
-                                     "A planilha DEVE conter colunas chamadas 'Nome' e 'Telefone'.\n"
-                                     "Uma coluna 'Mensagem' é opcional.",
-# ... (existing code ... parent) ...
-                                     parent=self)
-                return
-
-# ... (existing code ... importados) ...
-            importados = 0
-            for index, row in df.iterrows():
-# ... (existing code ... try) ...
-                try:
-                    nome = str(row['Nome']).strip()
-# ... (existing code ... tel) ...
-                    tel = str(row['Telefone']).strip().replace('.0', '')
-                    msg = str(row.get('Mensagem', '')).strip()
-# ... (existing code ... if nome) ...
-                    if nome and tel:
-                        # Se a planilha tiver uma mensagem, usa ela. Senão, fica em branco (para ser gerada).
-# ... (existing code ... ctrl.add_contact) ...
-                        ctrl.add_contact(nome, tel, mensagem=msg, status="Pendente")
-                        importados += 1
-# ... (existing code ... except Exception) ...
-                except Exception as e:
-                    print(f"Erro ao importar linha {index}: {e}")
-            
-# ... (existing code ... messagebox.showinfo) ...
-            messagebox.showinfo("Importação Concluída", 
-                                f"{importados} de {len(df)} contatos foram importados com status 'Pendente'.",
-# ... (existing code ... parent) ...
-                                parent=self)
-            self.refresh_table()
-# ... (existing code ... except Exception) ...
+            headers = self._read_import_headers(filepath)
         except Exception as e:
-            messagebox.showerror("Erro ao Ler Arquivo", f"Não foi possível ler a planilha.\nErro: {e}", parent=self)
+            messagebox.showerror("Erro ao ler cabeçalhos", f"Não foi possível ler o arquivo selecionado.\n{e}", parent=self)
+            return
+
+        if not headers:
+            messagebox.showwarning("Arquivo vazio", "Não foram encontradas colunas na planilha selecionada.", parent=self)
+            return
+
+        dlg = ColumnMappingDialog(self, headers)
+        self.wait_window(dlg)
+        mapping_result = getattr(dlg, "result", None)
+        if not mapping_result:
+            return
+        profile = mapping_result.get("profile", "Contatos Padrão")
+        mapping = mapping_result.get("mapping", {})
+
+        try:
+            rows = self._read_import_rows(filepath)
+        except ImportError as e:
+            messagebox.showerror(
+                "Biblioteca faltando",
+                f"{e}\nInstale 'pandas' ou 'openpyxl' para importar planilhas Excel.",
+                parent=self,
+            )
+            return
+        except Exception as e:
+            messagebox.showerror("Erro ao processar arquivo", f"Não foi possível ler os dados.\n{e}", parent=self)
+            return
+
+        importados = 0
+        pulados = 0
+        for row in rows:
+            custom_id = self._extract_value(row, mapping.get("id"))
+            nome = self._extract_value(row, mapping.get("nome"))
+            telefone = self._extract_value(row, mapping.get("telefone"))
+
+            if profile == "Relatório Negativados":
+                if not nome:
+                    pulados += 1
+                    continue
+                extras = []
+                valor = self._extract_value(row, mapping.get("valor"))
+                if valor:
+                    extras.append(f"Valor: {valor}")
+                vencimento = self._extract_value(row, mapping.get("vencimento"))
+                if vencimento:
+                    extras.append(f"Venc: {vencimento}")
+                id_titulo = self._extract_value(row, mapping.get("id_titulo"))
+                if id_titulo:
+                    extras.append(f"ID: {id_titulo}")
+                mensagem_extra = " | ".join(extras)
+                mensagem = mensagem_extra.strip()
+                if mapping.get("mensagem"):
+                    obs = self._extract_value(row, mapping.get("mensagem"))
+                    mensagem = f"{obs} | {mensagem}".strip(" |")
+                try:
+                    ctrl.add_contact(nome, telefone, mensagem=mensagem, status="Pendente", custom_id=custom_id if custom_id else None)
+                    importados += 1
+                except Exception as exc:
+                    print(f"Erro ao importar contato {nome}: {exc}")
+                    pulados += 1
+                continue
+
+            if not nome or not telefone:
+                pulados += 1
+                continue
+
+            status = self._extract_value(row, mapping.get("status")) or "Pendente"
+            mensagem = self._extract_value(row, mapping.get("mensagem"))
+
+            try:
+                ctrl.add_contact(nome, telefone, mensagem=mensagem, status=status, custom_id=custom_id if custom_id else None)
+                importados += 1
+            except Exception as exc:
+                print(f"Erro ao importar contato {nome}: {exc}")
+                pulados += 1
+
+        messagebox.showinfo(
+            "Importação Concluída",
+            f"Contatos importados: {importados}\nRegistros pulados: {pulados}",
+            parent=self,
+        )
+        if importados:
+            self.current_page = 1
+            self.refresh_table()
 
 # ... (existing code ... def view_message) ...
     # --- Ações de Mensagem ---
@@ -582,3 +765,153 @@ class ContatosPage(ctk.CTkFrame):
     def adicionar_log(self, texto: str):
 # ... (existing code ... print) ...
         print("[CONTATOS]", texto)
+
+    # --- Funções auxiliares para importação ---
+    def _read_import_headers(self, filepath: str):
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext not in ('.csv', '.xlsx', '.xls'):
+            raise ValueError("Formato não suportado. Utilize arquivos .csv ou .xlsx.")
+
+        if ext == '.csv':
+            header, _ = self._read_csv_contents(filepath)
+            return header
+
+        header, _ = self._read_excel_contents(filepath)
+        return header
+
+    def _read_import_rows(self, filepath: str):
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext not in ('.csv', '.xlsx', '.xls'):
+            raise ValueError("Formato não suportado. Utilize arquivos .csv ou .xlsx.")
+
+        if ext == '.csv':
+            header, rows = self._read_csv_contents(filepath)
+        else:
+            header, rows = self._read_excel_contents(filepath)
+
+        return self._rows_to_dicts(header, rows)
+
+    def _extract_value(self, row: dict, header: str):
+        if not header:
+            return ""
+        value = row.get(header, "")
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    def _read_csv_contents(self, filepath: str):
+        with open(filepath, 'r', newline='', encoding='utf-8-sig') as f:
+            sample = f.read(4096)
+            f.seek(0)
+            delimiter = ','
+            if sample:
+                try:
+                    dialect = csv.Sniffer().sniff(sample, delimiters=";,")
+                    delimiter = dialect.delimiter
+                except csv.Error:
+                    if sample.count(';') > sample.count(','):
+                        delimiter = ';'
+            reader = csv.reader(f, delimiter=delimiter)
+            preview = []
+            for _ in range(30):
+                try:
+                    preview.append(next(reader))
+                except StopIteration:
+                    break
+
+            header, header_idx = self._select_header_row(preview)
+            normalized_header = self._normalize_headers(header)
+
+            data_rows = []
+            for idx, row in enumerate(preview):
+                if idx <= header_idx:
+                    continue
+                data_rows.append(row)
+
+            for row in reader:
+                data_rows.append(row)
+
+        return normalized_header, data_rows
+
+    def _read_excel_contents(self, filepath: str):
+        if not OPENPYXL_AVAILABLE:
+            raise ImportError("openpyxl não disponível para leitura de arquivos Excel.")
+
+        wb = load_workbook(filepath, read_only=True, data_only=True)
+        ws = wb.active
+        rows = [self._clean_row(row) for row in ws.iter_rows(values_only=True)]
+        wb.close()
+
+        if not rows:
+            return [], []
+
+        preview = rows[:30]
+        header, header_idx = self._select_header_row(preview)
+        normalized_header = self._normalize_headers(header)
+
+        data_start = header_idx + 1 if header_idx >= 0 else 0
+        data_rows = rows[data_start:]
+        return normalized_header, data_rows
+
+    def _select_header_row(self, rows):
+        keywords = ['id', 'cliente', 'vencimento', 'valor', 'emissão', 'status', 'telefone', 'celular']
+        fallback = None
+        fallback_idx = -1
+        for idx, row in enumerate(rows):
+            cleaned = self._clean_row(row)
+            non_empty = sum(1 for cell in cleaned if cell)
+            if non_empty <= 1:
+                continue
+
+            line_lower = [cell.lower() for cell in cleaned if cell]
+            hits = sum(
+                1 for keyword in keywords
+                if any(keyword in cell for cell in line_lower)
+            )
+            if hits >= 2:
+                return cleaned, idx
+
+            if fallback is None and non_empty > 3:
+                fallback = cleaned
+                fallback_idx = idx
+
+        if fallback is not None:
+            return fallback, fallback_idx
+        return [], -1
+
+    def _rows_to_dicts(self, header, rows):
+        if not header:
+            return []
+        data = []
+        for row in rows:
+            cleaned = self._clean_row(row)
+            if not any(cleaned):
+                continue
+            row_dict = {key: value for key, value in zip_longest(header, cleaned, fillvalue="")}
+            data.append(row_dict)
+        return data
+
+    def _clean_row(self, row):
+        cleaned = []
+        if not row:
+            return []
+        for cell in row:
+            if cell is None:
+                cleaned.append("")
+            else:
+                cleaned.append(str(cell).strip())
+        return cleaned
+
+    def _normalize_headers(self, headers):
+        normalized = []
+        seen = set()
+        for idx, header in enumerate(headers):
+            base = header.strip() if header else f"Coluna {idx+1}"
+            candidate = base or f"Coluna {idx+1}"
+            suffix = 1
+            while candidate in seen:
+                candidate = f"{base}_{suffix}"
+                suffix += 1
+            normalized.append(candidate)
+            seen.add(candidate)
+        return normalized
